@@ -36,7 +36,7 @@
     <div id="instructions">
         CLICK TO LOCK MOUSE • WASD = MOVE • MOUSE = LOOK &amp; SHOOT<br>
         E = OPEN CHEST • B = OPEN SHOP • M = MULTIPLAYER MENU<br>
-        Zombies chase the closest player • Works in single &amp; multiplayer
+        Zombies chase closest player • Works in single &amp; multiplayer
     </div>
 
     <div id="crosshair">✕</div>
@@ -64,7 +64,7 @@
         </div>
         <button onclick="joinGame()" class="mp-btn">JOIN GAME</button>
         
-        <div style="margin-top:20px; font-size:12px; opacity:0.7;">Everyone sees the same zombies • Max 4 players<br>Works on any static website (GitHub Pages, Netlify...)</div>
+        <div style="margin-top:20px; font-size:12px; opacity:0.7;">Everyone sees the same zombies • Max 4 players<br>Works on any static website</div>
         <button onclick="closeMultiMenu()" style="margin-top:25px; background:#0ff; color:#111; padding:10px 30px;">CLOSE</button>
     </div>
 
@@ -78,8 +78,7 @@
     <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
     <script>
         // ================================================
-        // OFFICE CRYSTAL ZOMBIES 3D — FIXED &amp; CLEAN
-        // Zombies chase closest player • Everyone sees everyone • No black screen
+        // OFFICE CRYSTAL ZOMBIES 3D — FIXED (no more black screen)
         // ================================================
 
         const canvas = document.getElementById('canvas');
@@ -122,6 +121,7 @@
 
         // MULTIPLAYER
         let peer = null;
+        let conn = null;                    // ← FIXED: now declared
         let connections = [];
         let remotePlayers = {};
         let lastSyncTime = 0;
@@ -245,7 +245,6 @@
                 scene.remove(remotePlayers[peerId].mesh);
                 if (remotePlayers[peerId].label) document.body.removeChild(remotePlayers[peerId].label);
             }
-
             const group = new THREE.Group();
             const body = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.5, 2.2, 12), new THREE.MeshPhongMaterial({ color: 0x0088ff, emissive: 0x0044aa }));
             body.position.y = 1.1;
@@ -743,6 +742,8 @@
 
         function setupConnection(connection, isIncoming) {
             if (!connection) return;
+            conn = connection; // ← FIXED: set the global conn
+
             connection.on('open', () => {
                 document.getElementById('multiStatusText').textContent = `Connected as ${myNickname}!`;
                 document.getElementById('mpStatus').textContent = 'CONNECTED';
@@ -759,6 +760,7 @@
                     peerId: myPeerId
                 });
             });
+
             connection.on('data', data => {
                 if (data.type === 'player') {
                     if (!remotePlayers[data.peerId]) createRemotePlayer(data.peerId, data.nickname);
@@ -793,10 +795,12 @@
                     }
                 }
             });
+
             connection.on('close', () => {
                 removeRemotePlayer(connection.peer);
                 if (isHost) connections = connections.filter(c => c !== connection);
             });
+
             if (isHost && !connections.includes(connection)) connections.push(connection);
         }
 
@@ -923,7 +927,7 @@
             camera.rotation.set(pitch, yaw, 0);
             for (let i = 0; i < 9; i++) spawnZombie();
             initControls();
-            console.log("%c✅ OFFICE CRYSTAL ZOMBIES 3D — FIXED! No more black screen. Zombies chase closest player.", "color:#0ff; font-size:14px");
+            console.log("%c✅ OFFICE CRYSTAL ZOMBIES 3D — FIXED! No more black screen or conn error.", "color:#0ff; font-size:14px");
             gameLoop();
         }
 
