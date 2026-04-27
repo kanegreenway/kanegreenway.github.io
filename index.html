@@ -36,7 +36,7 @@
     <div id="instructions">
         CLICK TO LOCK MOUSE • WASD = MOVE • MOUSE = LOOK &amp; SHOOT<br>
         E = OPEN CHEST • B = OPEN SHOP • M = MULTIPLAYER MENU<br>
-        Zombies are now fully synced — play together!
+        Everyone sees the same zombies — they chase the closest player!
     </div>
 
     <div id="crosshair">✕</div>
@@ -64,7 +64,7 @@
         </div>
         <button onclick="joinGame()" class="mp-btn">JOIN GAME</button>
         
-        <div style="margin-top:20px; font-size:12px; opacity:0.7;">Zombies are fully synced for everyone.<br>Works on any static site (GitHub Pages, Netlify...)</div>
+        <div style="margin-top:20px; font-size:12px; opacity:0.7;">Up to 4 players • Zombies chase closest player<br>Works on any static website</div>
         <button onclick="closeMultiMenu()" style="margin-top:25px; background:#0ff; color:#111; padding:10px 30px;">CLOSE</button>
     </div>
 
@@ -78,8 +78,10 @@
     <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
     <script>
         // ================================================
-        // OFFICE CRYSTAL ZOMBIES 3D — ZOMBIES SYNCED + NICKNAMES
-        // Fully synced zombies (host authoritative) • Custom nicknames • Everything else
+        // OFFICE CRYSTAL ZOMBIES 3D — FIXED MULTIPLAYER
+        // • Everyone sees everyone (proper multi-player models)
+        // • Zombies chase the CLOSEST player (host authoritative)
+        // • Custom nicknames + full sync
         // ================================================
 
         const canvas = document.getElementById('canvas');
@@ -120,15 +122,13 @@
         let walls = [], desks = [], chests = [], zombies = [], projectiles = [], particles = [];
         let shopTerminal = null;
 
-        // MULTIPLAYER
+        // MULTIPLAYER (star topology - host relays)
         let peer = null;
-        let conn = null;
-        let remotePlayer = null;
-        let remotePlayerLabel = null;
+        let connections = [];           // host only
+        let remotePlayers = {};         // { peerId: { mesh, label, nickname } }
         let lastSyncTime = 0;
         let myPeerId = '';
         let myNickname = 'Player';
-        let remoteNickname = 'Friend';
         let isHost = false;
         let zombieIdCounter = 0;
 
@@ -242,30 +242,60 @@
             weaponGroup.add(crystal);
         }
 
-        function createRemotePlayer() {
-            if (remotePlayer) scene.remove(remotePlayer);
-            if (remotePlayerLabel) document.body.removeChild(remotePlayerLabel);
+        function createRemotePlayer(peerId, nickname) {
+            if (remotePlayers[peerId]) {
+                scene.remove(remotePlayers[peerId].mesh);
+                if (remotePlayers[peerId].label) document.body.removeChild(remotePlayers[peerId].label);
+            }
 
-            remotePlayer = new THREE.Group();
+            const group = new THREE.Group();
 
             const body = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.5, 2.2, 12), new THREE.MeshPhongMaterial({ color: 0x0088ff, emissive: 0x0044aa }));
             body.position.y = 1.1;
-            remotePlayer.add(body);
+            group.add(body);
 
             const head = new THREE.Mesh(new THREE.SphereGeometry(0.55, 16, 16), new THREE.MeshPhongMaterial({ color: 0xF0D0B0 }));
             head.position.y = 2.6;
-            remotePlayer.add(head);
+            group.add(head);
 
             const glow = new THREE.Mesh(new THREE.CylinderGeometry(0.65, 0.65, 2.4, 12), new THREE.MeshPhongMaterial({ color: 0x00ffff, emissive: 0x00ffff, transparent: true, opacity: 0.3 }));
             glow.position.y = 1.1;
-            remotePlayer.add(glow);
+            group.add(glow);
 
-            scene.add(remotePlayer);
+            scene.add(group);
 
-            remotePlayerLabel = document.createElement('div');
-            remotePlayerLabel.className = 'remote-player-label';
-            remotePlayerLabel.textContent = remoteNickname;
-            document.body.appendChild(remotePlayerLabel);
+            const label = document.createElement('div');
+            label.className = 'remote-player-label';
+            label.textContent = nickname || 'Player';
+            document.body.appendChild(label);
+
+            remotePlayers[peerId] = { mesh: group, label: label, nickname: nickname || 'Player' };
+        }
+
+        function updateRemotePlayer(peerId, data) {
+            const rp = remotePlayers[peerId];
+            if (!rp) return;
+
+            rp.mesh.position.set(data.pos.x, data.pos.y, data.pos.z);
+            rp.mesh.rotation.set(0, data.rot.y, 0);
+
+            if (rp.label) {
+                const vector = rp.mesh.position.clone();
+                vector.y += 3.5;
+                vector.project(camera);
+                const x = (vector.x * 0.5 + 0.5) * window.innerWidth;
+                const y = (-vector.y * 0.5 + 0.5) * window.innerHeight;
+                rp.label.style.left = x + 'px';
+                rp.label.style.top = y + 'px';
+            }
+        }
+
+        function removeRemotePlayer(peerId) {
+            const rp = remotePlayers[peerId];
+            if (!rp) return;
+            scene.remove(rp.mesh);
+            if (rp.label) document.body.removeChild(rp.label);
+            delete remotePlayers[peerId];
         }
 
         function spawnZombie(isBoss = false, isSpider = false) {
@@ -295,7 +325,6 @@
             const angle = Math.random() * Math.PI * 2;
             group.position.set(Math.cos(angle) * 38, 0, Math.sin(angle) * 38);
 
-            // Unique ID for syncing (only host uses this)
             const zombieId = isHost ? `z_${Date.now()}_${zombieIdCounter++}` : null;
 
             group.userData = {
@@ -346,7 +375,9 @@
             scene.add(proj);
             projectiles.push(proj);
 
-            if (conn && conn.open) {
+            if (isHost) {
+                broadcast({ type: 'shoot', pos: { x: start.x, y: start.y, z: start.z } });
+            } else if (conn && conn.open) {
                 conn.send({ type: 'shoot', pos: { x: start.x, y: start.y, z: start.z } });
             }
 
@@ -393,6 +424,21 @@
             return true;
         }
 
+        function getClosestPlayerPosition(zombiePos) {
+            let closest = camera.position;
+            let minDist = zombiePos.distanceTo(camera.position);
+
+            // Check all remote players
+            Object.values(remotePlayers).forEach(rp => {
+                const dist = zombiePos.distanceTo(rp.mesh.position);
+                if (dist < minDist) {
+                    minDist = dist;
+                    closest = rp.mesh.position;
+                }
+            });
+            return closest;
+        }
+
         function updatePlayer(delta) {
             if (player.slowTimer > 0) player.slowTimer -= delta;
 
@@ -418,18 +464,18 @@
         }
 
         function updateZombies(delta) {
-            // Only the HOST runs full zombie AI and logic
-            if (!isHost) return;
+            const shouldRunAI = isHost || !peer; // Host or singleplayer
 
             for (let i = zombies.length - 1; i >= 0; i--) {
                 const z = zombies[i];
                 if (!z.userData.isAlive) continue;
 
-                const toPlayer = new THREE.Vector3().subVectors(camera.position, z.position);
-                const dist = toPlayer.length();
+                const targetPos = shouldRunAI ? getClosestPlayerPosition(z.position) : camera.position;
+                const toTarget = new THREE.Vector3().subVectors(targetPos, z.position);
+                const dist = toTarget.length();
 
-                if (dist > 0.1) {
-                    let flatDir = toPlayer.clone();
+                if (dist > 0.1 && shouldRunAI) {
+                    let flatDir = toTarget.clone();
                     flatDir.y = 0;
                     flatDir.normalize();
 
@@ -453,10 +499,10 @@
                     }
 
                     z.position.y = 0;
-                    z.lookAt(camera.position.x, z.position.y, camera.position.z);
+                    z.lookAt(targetPos.x, z.position.y, targetPos.z);
                 }
 
-                if (z.userData.isSpider && Date.now() - z.userData.lastSpecial > 1800) {
+                if (shouldRunAI && z.userData.isSpider && Date.now() - z.userData.lastSpecial > 1800) {
                     z.userData.lastSpecial = Date.now();
                     shootWeb(z.position.clone().add(new THREE.Vector3(0, 1.5, 0)));
                 }
@@ -466,7 +512,8 @@
                     if (z.userData.poisonTimer % 20 === 0) z.userData.health -= 8;
                 }
 
-                if (dist < 2) {
+                const playerDist = z.position.distanceTo(camera.position);
+                if (playerDist < 2) {
                     player.health -= z.userData.isBoss ? 45 * delta : 22 * delta;
                     if (player.health <= 0) { gameRunning = false; showGameOver(); }
                 }
@@ -487,29 +534,29 @@
                 }
             }
 
-            // Broadcast zombie state to client every ~180ms
-            const now = Date.now();
-            if (conn && conn.open && now - lastSyncTime > 175) {
-                lastSyncTime = now;
-                const zombieData = zombies
-                    .filter(z => z.userData.isAlive)
-                    .map(z => ({
-                        id: z.userData.id,
-                        x: z.position.x,
-                        y: z.position.y,
-                        z: z.position.z,
-                        health: Math.max(0, z.userData.health),
-                        isAlive: z.userData.isAlive
-                    }));
-                conn.send({ type: 'zombies', zombies: zombieData });
+            // Host broadcasts zombie state
+            if (isHost && connections.length > 0) {
+                const now = Date.now();
+                if (now - lastSyncTime > 175) {
+                    lastSyncTime = now;
+                    const zombieData = zombies
+                        .filter(z => z.userData.isAlive)
+                        .map(z => ({
+                            id: z.userData.id,
+                            x: z.position.x,
+                            y: z.position.y,
+                            z: z.position.z,
+                            health: Math.max(0, z.userData.health),
+                            isAlive: z.userData.isAlive
+                        }));
+                    broadcast({ type: 'zombies', zombies: zombieData });
+                }
             }
         }
 
         function applyZombieSync(data) {
-            // Client receives authoritative zombie state from host
             const receivedIds = new Set(data.zombies.map(z => z.id));
 
-            // Update existing or create new
             data.zombies.forEach(zData => {
                 let found = false;
                 for (let z of zombies) {
@@ -522,9 +569,7 @@
                     }
                 }
                 if (!found && zData.isAlive) {
-                    // Create a visual-only zombie (no AI)
                     const group = new THREE.Group();
-                    const scale = 1;
                     const body = new THREE.Mesh(new THREE.BoxGeometry(1.2, 2.2, 0.8), new THREE.MeshPhongMaterial({ color: 0x112233 }));
                     body.position.y = 1.1;
                     group.add(body);
@@ -542,7 +587,6 @@
                 }
             });
 
-            // Remove zombies that host says are dead
             for (let i = zombies.length - 1; i >= 0; i--) {
                 const z = zombies[i];
                 if (z.userData.isClientOnly && !receivedIds.has(z.userData.id)) {
@@ -580,16 +624,12 @@
                 for (let j = zombies.length - 1; j >= 0; j--) {
                     const z = zombies[j];
                     if (p.position.distanceTo(z.position) < 1.8 && !p.userData.isWeb) {
-                        // If host, apply damage directly
                         if (isHost) {
                             z.userData.health -= 28;
                             if (p.userData.toxic) { z.userData.poisoned = true; z.userData.poisonTimer = 160; }
                             if (p.userData.slow) z.userData.slowTimer = 110;
-                        } else {
-                            // Client sends damage request to host
-                            if (conn && conn.open && z.userData.id) {
-                                conn.send({ type: 'damage', zombieId: z.userData.id, damage: 28 });
-                            }
+                        } else if (conn && conn.open && z.userData.id) {
+                            conn.send({ type: 'damage', zombieId: z.userData.id, damage: 28 });
                         }
 
                         for (let k = 0; k < 12; k++) {
@@ -617,35 +657,32 @@
             }
         }
 
-        function updateRemotePlayer(data) {
-            if (!remotePlayer) return;
-            remotePlayer.position.set(data.pos.x, data.pos.y, data.pos.z);
-            remotePlayer.rotation.set(0, data.rot.y, 0);
-
-            if (remotePlayerLabel) {
-                const vector = remotePlayer.position.clone();
-                vector.y += 3.5;
-                vector.project(camera);
-                const x = (vector.x * 0.5 + 0.5) * window.innerWidth;
-                const y = (-vector.y * 0.5 + 0.5) * window.innerHeight;
-                remotePlayerLabel.style.left = x + 'px';
-                remotePlayerLabel.style.top = y + 'px';
-            }
-        }
-
         function sendPlayerUpdate() {
-            if (!conn || !conn.open) return;
+            if ((!isHost && (!conn || !conn.open)) || Object.keys(remotePlayers).length === 0) return;
             const now = Date.now();
             if (now - lastSyncTime < 130) return;
             lastSyncTime = now;
 
-            conn.send({
+            const data = {
                 type: 'player',
                 pos: { x: camera.position.x, y: camera.position.y, z: camera.position.z },
                 rot: { x: pitch, y: yaw },
                 health: player.health,
                 score: score,
-                nickname: myNickname
+                nickname: myNickname,
+                peerId: myPeerId
+            };
+
+            if (isHost) {
+                broadcast(data);
+            } else if (conn && conn.open) {
+                conn.send(data);
+            }
+        }
+
+        function broadcast(data) {
+            connections.forEach(c => {
+                if (c.open) c.send(data);
             });
         }
 
@@ -688,7 +725,7 @@
             if (!gameRunning) return;
             multiOpen = true;
             document.getElementById('multiMenu').style.display = 'flex';
-            document.getElementById('multiStatusText').textContent = conn && conn.open ? `Connected as ${myNickname}` : 'Disconnected';
+            document.getElementById('multiStatusText').textContent = Object.keys(remotePlayers).length > 0 ? `Connected (${Object.keys(remotePlayers).length + 1} players)` : 'Disconnected';
         }
 
         function closeMultiMenu() {
@@ -701,15 +738,16 @@
             if (peer) peer.destroy();
             peer = new Peer();
             isHost = true;
+            connections = [];
             peer.on('open', id => {
                 myPeerId = id;
-                document.getElementById('multiStatusText').innerHTML = `Room ID: <strong style="color:#ff0; font-size:17px;">${id}</strong><br><small>Send to your friend</small>`;
+                document.getElementById('multiStatusText').innerHTML = `Room ID: <strong style="color:#ff0; font-size:17px;">${id}</strong><br><small>Send to friends (max 3)</small>`;
                 document.getElementById('mpStatus').textContent = 'HOSTING';
                 document.getElementById('multiStatus').style.display = 'block';
             });
             peer.on('connection', connection => {
-                conn = connection;
-                setupConnection();
+                connections.push(connection);
+                setupConnection(connection, true);
             });
         }
 
@@ -721,45 +759,60 @@
             peer = new Peer();
             isHost = false;
             peer.on('open', () => {
-                conn = peer.connect(roomId);
-                setupConnection();
+                const connection = peer.connect(roomId);
+                setupConnection(connection, false);
             });
         }
 
-        function setupConnection() {
-            if (!conn) return;
-            conn.on('open', () => {
+        function setupConnection(connection, isIncoming) {
+            if (!connection) return;
+
+            connection.on('open', () => {
                 document.getElementById('multiStatusText').textContent = `Connected as ${myNickname}!`;
                 document.getElementById('mpStatus').textContent = 'CONNECTED';
                 document.getElementById('multiStatus').style.display = 'block';
-                createRemotePlayer();
-                conn.send({ type: 'nickname', name: myNickname });
-                conn.send({ type: 'player', pos: { x: camera.position.x, y: camera.position.y, z: camera.position.z }, rot: { x: pitch, y: yaw }, health: player.health, score: score, nickname: myNickname });
+
+                connection.send({ type: 'nickname', name: myNickname, peerId: myPeerId });
+
+                // Create remote model for this player
+                createRemotePlayer(connection.peer, myNickname);
+
+                connection.send({
+                    type: 'player',
+                    pos: { x: camera.position.x, y: camera.position.y, z: camera.position.z },
+                    rot: { x: pitch, y: yaw },
+                    health: player.health,
+                    score: score,
+                    nickname: myNickname,
+                    peerId: myPeerId
+                });
             });
 
-            conn.on('data', data => {
+            connection.on('data', data => {
                 if (data.type === 'player') {
-                    updateRemotePlayer(data);
-                    if (data.nickname) {
-                        remoteNickname = data.nickname;
-                        if (remotePlayerLabel) remotePlayerLabel.textContent = remoteNickname;
+                    if (!remotePlayers[data.peerId]) {
+                        createRemotePlayer(data.peerId, data.nickname);
                     }
+                    updateRemotePlayer(data.peerId, data);
                 }
-                if (data.type === 'shoot' && remotePlayer) {
+                if (data.type === 'shoot') {
                     const flash = new THREE.PointLight(0xff8800, 9, 7);
                     flash.position.set(data.pos.x, data.pos.y, data.pos.z);
                     scene.add(flash);
                     setTimeout(() => scene.remove(flash), 90);
                 }
                 if (data.type === 'nickname') {
-                    remoteNickname = data.name;
-                    if (remotePlayerLabel) remotePlayerLabel.textContent = remoteNickname;
+                    if (remotePlayers[data.peerId]) {
+                        remotePlayers[data.peerId].nickname = data.name;
+                        if (remotePlayers[data.peerId].label) {
+                            remotePlayers[data.peerId].label.textContent = data.name;
+                        }
+                    }
                 }
                 if (data.type === 'zombies' && !isHost) {
                     applyZombieSync(data);
                 }
                 if (data.type === 'damage' && isHost) {
-                    // Host receives damage request from client
                     for (let z of zombies) {
                         if (z.userData.id === data.zombieId && z.userData.isAlive) {
                             z.userData.health -= data.damage;
@@ -776,11 +829,16 @@
                 }
             });
 
-            conn.on('close', () => {
-                document.getElementById('mpStatus').textContent = 'DISCONNECTED';
-                if (remotePlayer) { scene.remove(remotePlayer); remotePlayer = null; }
-                if (remotePlayerLabel) { document.body.removeChild(remotePlayerLabel); remotePlayerLabel = null; }
+            connection.on('close', () => {
+                removeRemotePlayer(connection.peer);
+                if (isHost) {
+                    connections = connections.filter(c => c !== connection);
+                }
             });
+
+            if (isHost && !connections.includes(connection)) {
+                connections.push(connection);
+            }
         }
 
         function gameLoop() {
@@ -844,9 +902,8 @@
             projectiles.forEach(p => scene.remove(p));
             particles.forEach(p => scene.remove(p));
             zombies = []; projectiles = []; particles = [];
-            if (remotePlayer) scene.remove(remotePlayer);
-            if (remotePlayerLabel) document.body.removeChild(remotePlayerLabel);
-            remotePlayer = null; remotePlayerLabel = null;
+            Object.keys(remotePlayers).forEach(id => removeRemotePlayer(id));
+            remotePlayers = {};
             chests.forEach(c => { c.visible = true; c.userData.opened = false; });
             document.getElementById('kills').textContent = '0';
             document.getElementById('wave').textContent = '1';
@@ -859,6 +916,7 @@
             shopOpen = false;
             multiOpen = false;
             isHost = false;
+            connections = [];
             clock.start();
             for (let i = 0; i < 9; i++) spawnZombie();
             gameLoop();
@@ -911,7 +969,7 @@
             for (let i = 0; i < 9; i++) spawnZombie();
             
             initControls();
-            console.log("%c✅ OFFICE CRYSTAL ZOMBIES 3D — ZOMBIES NOW FULLY SYNCED + NICKNAMES!", "color:#0ff; font-size:14px");
+            console.log("%c✅ OFFICE CRYSTAL ZOMBIES 3D — EVERYONE SEES EVERYONE + ZOMBIES CHASE CLOSEST PLAYER!", "color:#0ff; font-size:14px");
             gameLoop();
         }
 
